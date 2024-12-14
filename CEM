@@ -1,0 +1,1418 @@
+#include <Ticker.h>
+
+#ifdef ESP32
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#else
+#include <ESP8266WiFi.h>
+#include <ESPAsyncTCP.h>
+//https://github.com/me-no-dev/ESPAsyncTCP/archive/refs/heads/master.zip
+#endif
+
+#include <ESPAsyncWebSrv.h>
+//https://github.com/me-no-dev/ESPAsyncWebServer
+
+//#include <FS.h>
+#include <LittleFS.h>
+
+//****************REPLACE WITH YOUR OWN SSID AND WIFI NETWORK PASSWORD**********************
+//const char* ssid = "Aluna";
+//const char* password = "alunasailing";
+
+//const char* ssid = "moto e5 4019";
+//const char* ssid = "alunamobile";
+const char* ssid = "Bachard";
+const char* password = "901234567891";
+//This parameter can be changed if you wish to use higher frequencies (max 25000Hz).
+//When this is increased the resoltion of the slider will reduce
+const String frequencyLimit = "100";
+
+//DON'T CHANGE ANYTHING BELOW HERE !
+const char* PARAM_INPUT_1 = "state";
+const char* PARAM_INPUT_2 = "value";
+
+int sweepRange = 0;  //default start value
+String frequencystring = "";
+float phaseFrequency;
+String statusText = "ARRET";
+String freqset = "";
+const int output = 2;  //LED Pin on Wemos
+bool SD_present;
+float finishTime = 0;
+float finishT = 0;
+float wifiOffTime=0; 
+int ecoMode = LOW; //High=On system will shut down automatically
+const float incrTimeStep = 900;  //1000; //millis duration  of each Sweep step
+float publishTime = 0;           // time counter to show remaining time
+bool operationStatus = LOW;
+int presetMode = LOW;
+int waveFormState = LOW;      //LOW=Bipoloar
+int pauseState = LOW;         // LOW=no pause
+int baseMode = LOW;           //SSF frequence Off
+float maxFreq = 0;            // Paramteter for sweep function
+float minimumfreq = 0;        // Paramteter for sweep function
+float sweepFreqInterval = 0;  // Paramteter for sweep function
+float freqCount = 1;          // Paramteter for sweep function
+float SSF = 0;                //Low Frequency Constant Pulse default =0 = not active
+int SSFDuty = 0;              //dutycyclesetting for SSF
+float SSFTime = 0;
+float remainingPauseDuration = 0;
+int remainingIcount = 0;  // Count for each preset
+float phaseTimeRemaining = 0;
+
+int ledState = LOW;  // the current state blue LED
+int uploadsize, uploadtime;
+int i = 0;  // frequency counter
+float pulseStart = 0;
+float pulseEnd = 0;
+String MessageLine, webpage;
+int numfiles;
+Ticker timer;
+const int buttonPin = 5;            //D1 XD6 MCU interrupt button START/STOP
+volatile bool buttonState = false;  // indicates whether MPU interrupt pin has gone high
+
+//********* H-bridge Driver Pins  - Do not change as these are hard coded in the Interrupt Routine**********************************
+#define myPin1 0
+#define myPin2 4
+
+volatile int duty;
+volatile boolean interrupt_flag = true;
+
+typedef struct
+{
+  String filename;
+  String ftype;
+  String LittleFSize;
+} fileinfo;
+
+typedef struct
+{
+  float freq;
+} freqstr;
+freqstr freq_data[10 + 1];
+
+//Defaults
+fileinfo Filenames[100];     // Max of 100 chainsets/files that can be stored
+String sliderValue = "18";   //frequency Slider
+String sliderValue2 = "5";   //duty Cycle
+String sliderValue3 = "50";  //Pulse Interval
+String sliderValue4 = "5";   //treatment time
+String sliderValue7 = "0";   // Sweep Range
+String sliderValue8 = "0";   // SSF - Secondary Simulatneous Frequency
+
+float frequency = 10;  //us
+int dutyCycle = 5;
+int pulseRate = 50;
+float treatmentDurationinMins = 5;
+float phasefinishtime = 0;
+
+// Create AsyncWebServer object on port 80
+AsyncWebServer server(80);
+// Create an Event Source on /events
+AsyncEventSource events("/events");
+
+bool freqencytriggered;
+
+
+//******MAIN WEB PAGE*************************************
+
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML><html>
+ <head>
+  <title>SOINS PAR PEMF</title>
+      <meta name="viewport" content="width=device-width, initial-scale=1", user-scalable="yes">
+     <style>
+    html {font-family: Arial; display: inline-block; text-align: center;}
+     h1 {font-size: 2.0rem;}   
+      h2 {font-size: 1.5rem;}
+     h3 {font-size: 1.0rem; color: red; }
+     h4 {font-size: 0.75rem;}
+     f {font-size: 1.0rem;}
+     h5 {font-size: 0.75rem; color: red; }
+    p {font-size: 1.15rem;}
+    
+    body {max-width: 400px; margin:0px auto; padding-bottom: 25px;}
+    .switch {position: relative; display: inline-block; width: 120px; height: 68px} 
+    .switch input {display: none}
+    .slider { -webkit-appearance: none; margin: 5px; width: 360px; height: 20px; border-radius: 10px; background: #2196F3; outline: none; -webkit-transition: .2s; transition: opacity .2s;}
+    .slider::-webkit-slider-thumb {-webkit-appearance: none; appearance: none; width: 30px; height: 30px; border-radius: 15px; background: #003249; cursor: pointer;}
+    .slider::-moz-range-thumb { width: 30px; height: 30px;border-radius: 8px;; background: #003249; cursor: pointer; } 
+ 
+    .slider1 {position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; border-radius: 34px}
+    .slider1:before {position: absolute; content: ""; height: 52px; width: 52px; left: 8px; bottom: 8px; background-color: #fff; -webkit-transition: .4s; transition: .4s; border-radius: 68px}
+    input:checked+.slider1 {background-color: #ff0000}
+    input:checked+.slider1:before {-webkit-transform: translateX(52px); -ms-transform: translateX(52px); transform: translateX(52px)}
+ 
+    .switch2 {position: relative; display: inline-block; width: 60px; height: 34px} 
+    .switch2 input {display: none}
+    .slider2 {position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; border-radius: 17px}
+    .slider2:before {position: absolute; content: ""; height: 26px; width: 26px; left: 4px; bottom: 4px; background-color: #fff; -webkit-transition: .4s; transition: .4s; border-radius: 34px}
+    input:checked+.slider2 {background-color: #ff0000}
+    input:checked+.slider2:before {-webkit-transform: translateX(26px); -ms-transform: translateX(26px); transform: translateX(26px)}
+    
+    .slider3 {position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: #ffffff; border-radius: 17px}
+    .slider3:before {position: absolute; content: ""; height: 26px; width: 26px; left: 4px; bottom: 4px; background-color: #ffffff; -webkit-transition: .4s; transition: .4s; border-radius: 34px}
+    input:checked+.slider3 {background-color: #ffffff}
+    input:checked+.slider3:before {-webkit-transform: translateX(26px); -ms-transform: translateX(26px); transform: translateX(26px)}
+
+    .slider4 {position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: #2196F3; border-radius: 17px}
+    .slider4:before {position: absolute; content: ""; height: 26px; width: 26px; left: 4px; bottom: 4px; background-color: #003249; -webkit-transition: .4s; transition: .4s; border-radius: 34px}
+    input:checked+.slider4{background-color: #2196F3}
+    input:checked+.slider4:before {-webkit-transform: translateX(26px); -ms-transform: translateX(26px); transform: translateX(26px)}
+    
+    .slider5 { -webkit-appearance: none; margin: 0px; width: 100px; height: 20px; border-radius: 10px; background: #2196F3; outline: none; -webkit-transition: .2s; transition: opacity .2s;}
+    .slider5::-webkit-slider-thumb {-webkit-appearance: none; appearance: none; width: 30px; height: 30px; border-radius: 15px; background: #003249; cursor: pointer;}
+    .slider5::-moz-range-thumb { width: 30px; height: 30px;border-radius: 8px;; background: #003249; cursor: pointer; } 
+    
+    .grid-container {display: grid; grid-template-columns: auto auto auto ;
+    .grid-item {text-align: center;}
+
+    </style>
+
+</head>
+
+<body>
+  <span style="font-size: 1.7rem; font-weight: bold;">BACHARD-PEMF19</span> <span style="font-size: 0.7rem;">v4.0 &#x1F607;</span>
+  <div class="grid-container" style="height: 55px;">
+  <div class="grid-item"><span title="Manuel ou Programme">%BUTTON3PLACEHOLDER%</span></div>
+  <!--<div class="grid-item">%BLANKPLACEHOLDER%</div>-->
+  <div class="grid-item"><br>Appareil PEMF</div>
+  <div class="grid-item"><span title="Onde Bipolaire ou Unipolaire">%BUTTON4PLACEHOLDER%</span></div>
+  </div>
+  %BUTTON5PLACEHOLDER%
+  %BUTTON7PLACEHOLDER%
+  
+  <p>Travail Cyclique <span id="textSliderValue2">%SLIDERVALUE2% </span>&#37</p>
+  <p><input type="range" onchange="updateSliderPWM2(this)" id="pwmSlider2" min="1" max="50" value="%SLIDERVALUE2%" step="1" class="slider"></p>
+
+  <p>Intervalle entre Pulsions <span id="textSliderValue3">%SLIDERVALUE3% </span>&#37 On </p>
+  <p><input type="range" onchange="updateSliderPWM3(this)" id="pwmSlider3" min="1" max="100" value="%SLIDERVALUE3%" step="1" class="slider"></p>
+ 
+  <p>Temps de Traitement <span id="textSliderValue4">%SLIDERVALUE4% </span> min</p>
+  <p><input type="range" onchange="updateSliderPWM4(this)" id="pwmSlider4" min="1" max="100" value="%SLIDERVALUE4%" step="1" class="slider"></p>
+  <!--<div class="content">-->
+  <!--<p><i class="fas fa-thermometer-half" style="color:#059e8a;"></i> statusText</p>-->
+ 
+         <p><span class="reading"><span id="temp"; style="color:#FF0000;">%statusText%</span></span></p>
+ <!-- </div>-->
+  %FREQUENCYSET%
+
+  <!--<buttonx class="button" style="background-color:#2196F3; font-size:1.25em; border-radius: 6px; color:white; border: none; cursor: pointer; " onclick=location.href='/freqselect'>Change Frequencies</button></a>-->
+  %BUTTON6PLACEHOLDER%
+  
+  <div class="grid-container">
+  <div class="grid-item"><span title="Frequence Secondaire ">%BUTTON8PLACEHOLDER%</span></div>
+  <div class="grid-item">%BUTTON1PLACEHOLDER%</div>
+  <div class="grid-item">%BUTTON2PLACEHOLDER%</div>
+
+
+
+  </div>
+<script>
+  function toggleCheckbox(element) {
+    var xhr = new XMLHttpRequest();
+    if(element.checked){ xhr.open("GET", "/startStop?state=1", true); }
+    else { xhr.open("GET", "/startStop?state=0", true); }
+    xhr.send();
+ }
+  function toggleCheckbox1(element) {
+    var xhr = new XMLHttpRequest();
+    if(element.checked){ xhr.open("GET", "/pause?state=1", true); }
+    else { xhr.open("GET", "/pause?state=0", true); }
+    xhr.send();
+  }
+    function toggleCheckbox2(element) {
+    var xhr = new XMLHttpRequest();
+    if(element.checked){ xhr.open("GET", "/mode?state=1", true); }
+    else { xhr.open("GET", "/mode?state=0", true); }
+    xhr.send();
+    window.location.reload();
+  }
+    function toggleCheckbox3(element) {
+    var xhr = new XMLHttpRequest();
+    if(element.checked){ xhr.open("GET", "/waveform?state=1", true); }
+    else { xhr.open("GET", "/waveform?state=0", true); }
+    xhr.send();
+  }
+  function toggleCheckbox4(element) {
+    var xhr = new XMLHttpRequest();
+    if(element.checked){ xhr.open("GET", "/base?state=1", true); }
+    else { xhr.open("GET", "/base?state=0", true); }
+    xhr.send();
+  }
+  function updateSliderPWM(element) {
+    var sliderValue = document.getElementById("pwmSlider").value;
+    document.getElementById("textSliderValue").innerHTML = sliderValue;
+    console.log(sliderValue);
+    var xhrr = new XMLHttpRequest();
+    xhrr.open("GET", "/slider?value="+sliderValue, true);
+    xhrr.send();
+  }
+  function updateSliderPWM2(element) {
+    var sliderValue2 = document.getElementById("pwmSlider2").value;
+    document.getElementById("textSliderValue2").innerHTML = sliderValue2;
+    console.log(sliderValue2);
+    var xhrr = new XMLHttpRequest();
+    xhrr.open("GET", "/slider2?value="+sliderValue2, true);
+    xhrr.send();
+  }
+  function updateSliderPWM3(element) {
+    var sliderValue3 = document.getElementById("pwmSlider3").value;
+    document.getElementById("textSliderValue3").innerHTML = sliderValue3;
+    console.log(sliderValue3);
+    var xhrr = new XMLHttpRequest();
+    xhrr.open("GET", "/slider3?value="+sliderValue3, true);
+    xhrr.send();
+  }
+  function updateSliderPWM4(element) {
+    var sliderValue4 = document.getElementById("pwmSlider4").value;
+    document.getElementById("textSliderValue4").innerHTML = sliderValue4;
+    console.log(sliderValue4);
+    var xhrr = new XMLHttpRequest();
+    xhrr.open("GET", "/slider4?value="+sliderValue4, true);
+    xhrr.send();
+  }
+    function updateSliderPWM7(element) {
+    var sliderValue7 = document.getElementById("pwmSlider7").value;
+    document.getElementById("textSliderValue7").innerHTML = sliderValue7;
+    console.log(sliderValue7);
+    var xhrr = new XMLHttpRequest();
+    xhrr.open("GET", "/slider7?value="+sliderValue7, true);
+    xhrr.send();
+  }
+    function updateSliderPWM8(element) {
+    var sliderValue8 = document.getElementById("pwmSlider8").value;
+    document.getElementById("textSliderValue8").innerHTML = sliderValue8;
+    console.log(sliderValue8);
+    var xhrr = new XMLHttpRequest();
+    xhrr.open("GET", "/slider8?value="+sliderValue8, true);
+    xhrr.send();
+  }
+  <!--
+  function FREQUENCYequest () {
+    var xhttp = new XMLHttpRequest();
+    xhttp.open("GET", "/FREQUENCYEEPROM", true);
+    xhttp.send();
+  }
+  -->
+  setInterval(function ( ) {
+    var xhttp = new XMLHttpRequest();
+    xhttp.onreadystatechange = function() {
+      if (this.readyState == 4 && this.status == 200) {
+        var inputChecked1;
+        var inputChecked2; 
+        var inputChecked3;
+        var inputChecked4;
+        var outputStateM1;
+        var outputStateM2; 
+        var outputStateM3; var outputStateM4;
+        var responseStr = this.responseText;
+     
+          if( responseStr.charAt(0) == '1'){ 
+            inputChecked1 = true;
+            outputStateM1 = "Stop";
+          }
+           if( responseStr.charAt(0) == '0'){  
+            inputChecked1 = false;
+            outputStateM1 = "Start";
+          }
+        document.getElementById("output").checked = inputChecked1;
+        document.getElementById("outputState").innerHTML = outputStateM1;
+     
+          if( responseStr.charAt(1) == '0'){ 
+            inputChecked2 = false;
+            outputStateM2 = "Pause";
+          }
+          if( responseStr.charAt(1) == '1'){ 
+            inputChecked2 = true;
+            outputStateM2 = "Resume";
+          }
+          document.getElementById("play").checked = inputChecked2;
+          document.getElementById("playState").innerHTML = outputStateM2;
+          
+          if( responseStr.charAt(2) == '1'){ 
+            inputChecked3 = false;
+            outputStateM3 = "Manual";
+          }
+          if( responseStr.charAt(2) == '0'){ 
+            inputChecked3 = true;
+            outputStateM3 = "Presets";
+          }
+          document.getElementById("mode").checked = inputChecked3;
+          document.getElementById("modeState").innerHTML = outputStateM3;
+         
+          if( responseStr.charAt(3) == '1'){ 
+            inputChecked4 = false;
+            outputStateM4 = "Bipolar ";
+          }
+          if( responseStr.charAt(3) == '0'){ 
+            inputChecked4 = true;
+            outputStateM4 = "Unipolar";
+          }
+          document.getElementById("wave").checked = inputChecked4;
+          document.getElementById("waveState").innerHTML = outputStateM4; 
+        
+      }
+    };
+    
+    xhttp.open("GET", "/state", true);
+    xhttp.send();
+    
+  }, 1000 ) ;
+
+ 
+
+  if (!!window.EventSource) {
+  var source = new EventSource('/events');
+
+  source.addEventListener('open', function(e) {
+    console.log("Events Connected");
+  }, false);
+  source.addEventListener('error', function(e) {
+    if (e.target.readyState != EventSource.OPEN) {
+      console.log("Events Disconnected");
+    }
+  }, false);
+
+  source.addEventListener('message', function(e) {
+    console.log("message", e.data);
+  }, false);
+
+  source.addEventListener('statusText', function(e) {
+    console.log("statusText", e.data);
+    document.getElementById("temp").innerHTML = e.data;
+  }, false);
+  }
+
+
+</script>
+</body>
+</html>
+)rawliteral";
+
+
+String processor(const String& var) {
+  /*
+  if (var == "BLANKPLACEHOLDER") { //base
+    String baseStateValue = String(baseState);
+    //Reserve hidden button for future additional functions
+    //String buttons =  "<p><br><label class=\"switch2\"><input type=\"checkbox\"  ><span class=\"slider2\"></span></label>";//slider3 = blank
+    String buttons = "<f><span id=\"baseState\"></span><br></f><label class=\"switch2\"><input type=\"checkbox\" onchange=\"toggleCheckbox4(this)\" id=\"reset\" " + baseStateValue + "><span class=\"slider2\"></span></label>";
+    return buttons;
+  }
+  */
+  if (var == "BUTTON1PLACEHOLDER") {  //START BUTTON
+    String buttons = "";
+    String outputStateValue = outputState();
+    buttons += "<span id=\"outputState\"></span><br><h/4><label class=\"switch\"><input type=\"checkbox\" onchange=\"toggleCheckbox(this)\" id=\"output\" " + outputStateValue + "><span class=\"slider1\"></span></label>";
+    return buttons;
+  }
+  if (var == "BUTTON2PLACEHOLDER") {  //PAUSE BUTTON
+    String buttons = "";
+    String playStateValue = playState();
+    buttons += "<f><span id=\"playState\"></span><br></f><label class=\"switch2\"><input type=\"checkbox\" onchange=\"toggleCheckbox1(this)\" id=\"play\" " + playStateValue + "><span class=\"slider2\"></span></label>";
+    return buttons;
+  }
+  if (var == "BUTTON3PLACEHOLDER") {  //MAN-PRESET BUTTON
+    String buttons = "";
+    String modeStateValue = getmodeState();
+    buttons += "<f><span id=\"modeState\"></span><br></f><label class=\"switch2\"><input type=\"checkbox\" onchange=\"toggleCheckbox2(this)\" id=\"mode\" " + modeStateValue + "><span class=\"slider4\"></span></label>";
+    return buttons;
+  }
+  if (var == "BUTTON4PLACEHOLDER") {  //BIPOLAR-MONO BUTTON
+    String buttons = "";
+    String waveStateValue = getwaveState();
+    buttons += "<f><span id=\"waveState\"></span><br></f><label class=\"switch2\"><input type=\"checkbox\" onchange=\"toggleCheckbox3(this)\" id=\"wave\" " + waveStateValue + "><span class=\"slider4\"></span></label>";
+    return buttons;
+  }
+  if (var == "BUTTON5PLACEHOLDER") {  //FREQUENCY SLIDER
+    String buttons = "";
+    if (!presetMode) {
+      buttons += "<p>Frequence Centrale <span id=\"textSliderValue\">%SLIDERVALUE% </span> Hz</p><p><input type=\"range\" onchange=\"updateSliderPWM(this)\" id=\"pwmSlider\" min=\"1\" max=\"" + frequencyLimit + "\" value=\"%SLIDERVALUE%\" step=\"1\" class=\"slider\"></p>";
+    }
+    return buttons;
+  }
+  if (var == "BUTTON8PLACEHOLDER") {  //SSF SLIDER
+    String buttons = "";
+    //buttons += "<p>SSF <span id=\"textSliderValue8\">%SLIDERVALUE8% </span> Hz</p><p><input type=\"range\" onchange=\"updateSliderPWM8(this)\" id=\"pwmSlider8\" min=\"0\" max=\"10\" value=\"%SLIDERVALUE8%\" step=\".1\" class=\"slider5\"></p>";
+    buttons += "<f>FSS <span id=\"textSliderValue8\">%SLIDERVALUE8% </span> Hz</p><p><input type=\"range\" onchange=\"updateSliderPWM8(this)\" id=\"pwmSlider8\" min=\"0.0\" max=\"10\" value=\"%SLIDERVALUE8%\" step=\".1\" class=\"slider5\"></f>";
+    return buttons;
+  }
+  if (var == "BUTTON6PLACEHOLDER") {  //PRESET FREQUENCY SELECTION BUTTON
+    String buttons = "";
+    //String waveStateValue = getwaveState();
+    if (presetMode) {
+      buttons += "<h1></h1><button type=\'button\' onclick=location.href=\'/freqselect\'>Changer Programme</a></button><br>";
+    }
+    return buttons;
+  }
+  if (var == "BUTTON7PLACEHOLDER") {  //SWEEP RANGE
+    String buttons = "";
+
+    if (!presetMode) {  //SWEEP RANGE
+      buttons += "<p>Intervalle Balayage <span id=\"textSliderValue7\">%SLIDERVALUE7% </span> Hz</p><p><input type=\"range\" onchange=\"updateSliderPWM7(this)\" id=\"pwmSlider7\" min=\"0\" max=\"100\" value=\"%SLIDERVALUE7%\" step=\"1\" class=\"slider\"></p>";
+    }
+    return buttons;
+  }
+
+  if (var == "SLIDERVALUE") {  //Frequency
+    return sliderValue;
+  }
+  if (var == "SLIDERVALUE2") {
+    return sliderValue2;
+  }
+  if (var == "SLIDERVALUE3") {
+    return sliderValue3;
+  }
+  if (var == "SLIDERVALUE4") {
+    return sliderValue4;
+  }
+  if (var == "SLIDERVALUE7") {  //SWEEP RANGE
+    return sliderValue7;
+  }
+  if (var == "SLIDERVALUE8") {  //SSF RANGE
+    return sliderValue8;
+  }
+  if (var == "FREQUENCYSET") {
+    String frequencyStr = "";
+    //<p><h5>Programme: %FREQUENCYSET% Hz </h5></p>
+    if (presetMode) {
+      frequencyStr = "<p><h5>Programme: " + frequencystring + "Hz</h5></p>";
+    }
+    return frequencyStr;
+  }
+
+  if (var == "statusText") {
+    return String(statusText);
+  }
+
+  return String();
+}
+
+//The following string routines are really only necessary if phsyical buttons are connected to board
+String outputState() {
+  if (digitalRead(output)) {  //blue LED
+    operationStatus = 1;
+    return "checked";
+
+  } else {
+    operationStatus = 0;
+    return "";
+  }
+  operationStatus = 0;
+  return "";
+}
+String playState() {
+  if (pauseState) {
+    return "checked";
+  } else {
+    return "";
+  }
+  return "";
+}
+String getmodeState() {
+  if (presetMode) {
+    Serial.println("presetMode=HIGH - Play Presets");
+    return "checked";
+  } else {
+    Serial.println("presetMode=LOW - Play Sweep/Static Frequency");
+    return "";
+  }
+  return "";
+}
+String getwaveState() {
+  if (waveFormState) {
+    return "checked";
+  } else {
+    return "";
+  }
+  return "";
+}
+// ISR to Fire when Timer is triggered BIPOLAR
+void ICACHE_RAM_ATTR onTime() {  //ROUTINE TO SWITCH H-bridge - when active runs in background
+  if (interrupt_flag) {
+    WRITE_PERI_REG(0x60000304, 1 << 0);
+    delayMicroseconds(duty);
+    WRITE_PERI_REG(0x60000308, 1 << 0);
+    WRITE_PERI_REG(0x60000304, 1 << 4);
+    delayMicroseconds(duty);
+    WRITE_PERI_REG(0x60000308, 1 << 4);
+    //Serial.print("a");
+  }
+}
+
+void baseTimer() {
+  //ROUTINE TO SWITCH H-bridge - Code avtivated could be ifluenced by other slow program activities
+  if (interrupt_flag) {
+    WRITE_PERI_REG(0x60000304, 1 << 0);
+    delayMicroseconds(SSFDuty);  //duty for 10% @10Hz
+    WRITE_PERI_REG(0x60000308, 1 << 0);
+    WRITE_PERI_REG(0x60000304, 1 << 4);
+    delayMicroseconds(SSFDuty);
+    WRITE_PERI_REG(0x60000308, 1 << 4);
+    //Serial.print("b");
+  }
+}
+// ISR to Fire when Timer is triggered UNIPOLAR
+void ICACHE_RAM_ATTR onTimeUnipolar() {  //ROUTINE TO SWITCH H-bridge
+  if (interrupt_flag) {
+    WRITE_PERI_REG(0x60000304, 1 << 0);
+    delayMicroseconds(duty);
+    WRITE_PERI_REG(0x60000308, 1 << 0);
+    //WRITE_PERI_REG(0x60000304, 1 << 4);
+    delayMicroseconds(duty);
+    //WRITE_PERI_REG(0x60000308, 1 << 4);
+    //Serial.print("m");
+  }
+}
+//ISR Stop /START
+void ICACHE_RAM_ATTR isr() {
+  //buttonState = !buttonState
+  buttonState = HIGH;
+}
+
+void setup() {
+  // Serial port for debugging purposes only
+  Serial.begin(230400);
+
+  pinMode(output, OUTPUT);
+  digitalWrite(output, LOW);
+  //pinMode(buttonPin, INPUT);
+  pinMode(myPin1, OUTPUT);
+  pinMode(myPin2, OUTPUT);
+
+  timer1_attachInterrupt(onTime);  // Add ISR Function Bipolar as default
+  timer1_disable();
+  timer1_disable();
+  operationStatus = LOW;
+  pinMode(buttonPin, INPUT_PULLUP);
+  attachInterrupt(buttonPin, isr, FALLING);  //Interrupt if STOP/START
+  // Connect to Wi-Fi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi..");
+  }
+
+  // Print ESP Local IP Address
+  Serial.println(WiFi.localIP());
+  wifiOffTime = millis()+ 300000; //if device is not used turn wifi off after 5 minutes
+
+  //----------------------------------------------------------------------
+  Serial.print(F("Initializing SD card..."));
+  if (!LittleFS.begin()) {
+    Serial.println("LittleFS mount failed");
+    return;
+  }
+  Serial.println("");
+
+  //Read ini file - Last values ued XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+
+
+  readIniFile();
+  Serial.print("freqset ");
+  Serial.println(freqset);
+
+  readFrequencyFile();
+
+  /*
+  presetMode = HIGH;
+  sliderValue = "18";   //frequency Slider
+  sliderValue2 = "15";  //duty Cycle
+  sliderValue3 = "75";  //Pulse Interval
+  sliderValue4 = "30";  //treatment time
+  sliderValue7 = "0";   // Sweep Range
+  sliderValue8 = "0";   // SSF - Secondary Simulatneous Frequency
+  */
+
+  // Route for root / web page
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
+    request->send_P(200, "text/html", index_html, processor);
+  });
+  // Handle Web Server Events
+  events.onConnect([](AsyncEventSourceClient* client) {
+    if (client->lastId()) {
+      Serial.printf("Client reconnected! Last message ID that it got is: %u\n", client->lastId());
+    }
+    // send event with message "hello!", id current millis
+    // and set reconnect delay to 1 second
+    client->send("hello!", NULL, millis(), 10000);
+  });
+  server.addHandler(&events);
+
+
+
+  // START/STOP
+  server.on("/startStop", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String inputMessage;
+    String inputParam;
+    if (request->hasParam(PARAM_INPUT_1)) {
+      inputMessage = request->getParam(PARAM_INPUT_1)->value();
+      inputParam = PARAM_INPUT_1;
+      //int activ = inputMessage.toInt();
+      digitalWrite(output, inputMessage.toInt());
+      ledState = !ledState;
+
+      if (ledState == LOW) {  //Stop
+        phasefinishtime = 0;  //if STOP triggered
+        finishTime = 0;
+        i = 11;
+        Stop();
+        Serial.println("Stopped");
+
+      } else {  //Start
+        saveIniFile();
+        Start();
+        /*
+        operationStatus = HIGH;
+        finishTime = millis() + treatmentDurationinMins * 60000;  //for playing static / sweep frequency
+        //phasefinishtime = treatmentDurationinMins/10;
+        phasefinishtime = millis() + treatmentDurationinMins * 6000;  //for playin each preset frequency
+        i = 1;
+        interrupt_flag = true;
+        freqencytriggered = LOW;
+        if (sweepRange > 0) sweepParameters();
+        if (presetMode == LOW) {
+          setFrequency(frequency, dutyCycle);  // MANUAL FREQUENCY SET}
+          frequencystring = String(frequency);
+        }
+        freqCount = frequency;
+        */
+      }
+
+      Serial.print("operation status : ");
+      Serial.println(operationStatus);
+
+
+    } else {
+      inputMessage = "No message sent";
+      inputParam = "none";
+    }
+    Serial.print("input message:");
+    Serial.println(inputMessage);
+    request->send(200, "text/plain", "OK");
+    //loop();
+  });
+
+  //SET STATIC FREQUENCY SLIDER
+  server.on("/slider", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String inputMessage;
+
+    if (request->hasParam(PARAM_INPUT_2)) {
+      inputMessage = request->getParam(PARAM_INPUT_2)->value();
+      Serial.println(inputMessage);
+      sliderValue = inputMessage;
+      frequency = sliderValue.toInt();  // uS
+      setFrequency(frequency, dutyCycle);
+      freqCount = frequency;
+      Serial.print("frequency=");
+      Serial.print(frequency);
+      if (sweepRange > 0) sweepParameters();
+    } else {
+      inputMessage = "No message sent";
+    }
+    request->send(200, "text/plain", "OK");
+  });
+
+
+  // PAUSE
+  server.on("/pause", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String inputMessage;
+    String inputParam;
+    // GET input1 value on <ESP_IP>/startStop?state=<inputMessage>
+    if (request->hasParam(PARAM_INPUT_1)) {
+      inputMessage = request->getParam(PARAM_INPUT_1)->value();
+      inputParam = PARAM_INPUT_1;
+      pauseState = !pauseState;
+      if (ledState == LOW) pauseState = LOW;
+      if (pauseState == HIGH) {
+        Serial.println("PAUSE");
+        remainingPauseDuration = phaseTimeRemaining;
+        if (presetMode == LOW) remainingPauseDuration = finishTime - millis();
+        remainingIcount = i;
+        interrupt_flag = false;
+        treatmentDurationinMins = 0;
+      } else {
+        Serial.println("RESUMED");
+        i = remainingIcount;
+        operationStatus = HIGH;
+        treatmentDurationinMins = remainingPauseDuration;
+        interrupt_flag = true;
+      }
+    } else {
+    }
+    request->send(200, "text/plain", "OK");
+  });
+
+  // MODUS STATIC OR PRESET
+  server.on("/mode", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String inputMessage;
+    String inputParam;
+    if (request->hasParam(PARAM_INPUT_1)) {
+      inputMessage = request->getParam(PARAM_INPUT_1)->value();
+      inputParam = PARAM_INPUT_1;
+      presetMode = !presetMode;
+      Stop();
+      if (presetMode == HIGH) {
+        Serial.println("PRESET");
+
+      } else {
+        Serial.println("MANUAL");
+      }
+    } else {
+    }
+    request->send(200, "text/plain", "OK");
+  });
+
+
+  //WAVE FORM BI or Mono
+  server.on("/waveform", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String inputMessage;
+    String inputParam;
+    if (request->hasParam(PARAM_INPUT_1)) {
+      inputMessage = request->getParam(PARAM_INPUT_1)->value();
+      inputParam = PARAM_INPUT_1;
+      waveFormState = !waveFormState;
+      //Stop();
+      timer1_disable();
+      if (waveFormState == HIGH) {
+        Serial.println("Unipoloar");
+        timer1_attachInterrupt(onTimeUnipolar);
+        setFrequency(frequency, dutyCycle);
+      } else {
+        Serial.println("Bipolar");
+        timer1_attachInterrupt(onTime);
+        setFrequency(frequency, dutyCycle);
+      }
+    } else {
+    }
+    request->send(200, "text/plain", "OK");
+  });
+
+  // DUTY CYCLE
+  server.on("/slider2", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String inputMessage;
+    if (request->hasParam(PARAM_INPUT_2)) {
+      inputMessage = request->getParam(PARAM_INPUT_2)->value();
+      Serial.println(inputMessage);
+      sliderValue2 = inputMessage;
+      dutyCycle = sliderValue2.toInt();  // uS
+      Serial.print("dutyCycle=");
+      Serial.println(dutyCycle);
+      if (operationStatus == HIGH) setFrequency(frequency, dutyCycle);  //Update if playing
+    } else {
+      inputMessage = "No message sent";
+    }
+    //Serial.println(inputMessage);
+    request->send(200, "text/plain", "OK");
+  });
+  //PULSE INTERVAL
+  server.on("/slider3", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String inputMessage;
+    if (request->hasParam(PARAM_INPUT_2)) {
+      inputMessage = request->getParam(PARAM_INPUT_2)->value();
+      Serial.println(inputMessage);
+      sliderValue3 = inputMessage;
+      pulseRate = sliderValue3.toInt();  // uS intensity
+      //pwmintensity = intensity * 2.55;
+      Serial.print("pulseRate=");
+      Serial.println(pulseRate);
+      //freqParameters();
+    } else {
+      inputMessage = "No message sent";
+    }
+    //Serial.println(inputMessage);
+    request->send(200, "text/plain", "OK");
+  });
+  //TREATMENT DURATION
+  server.on("/slider4", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String inputMessage;
+    if (request->hasParam(PARAM_INPUT_2)) {
+      inputMessage = request->getParam(PARAM_INPUT_2)->value();
+      Serial.println(inputMessage);
+      sliderValue4 = inputMessage;
+      treatmentDurationinMins = sliderValue4.toInt();  // uS
+      Serial.print("treatmentDurationinMins=");
+      Serial.println(treatmentDurationinMins);
+      //freqParameters();
+    } else {
+      inputMessage = "No message sent";
+    }
+    //Serial.println(inputMessage);
+    request->send(200, "text/plain", "OK");
+  });
+  //SLIDER 7 SWEEP RANGE
+  server.on("/slider7", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String inputMessage;
+    if (request->hasParam(PARAM_INPUT_2)) {
+      inputMessage = request->getParam(PARAM_INPUT_2)->value();
+      Serial.println(inputMessage);
+      sliderValue7 = inputMessage;
+      sweepRange = sliderValue7.toInt();  // uS
+      Serial.print("sweepRange=");
+      Serial.println(sweepRange);
+      if (sweepRange > 0) sweepParameters();
+
+    } else {
+      inputMessage = "No message sent";
+    }
+    //Serial.println(inputMessage);
+    request->send(200, "text/plain", "OK");
+  });
+  //SLIDER 8 LOW FREQUENCY CONSTANT PULSE SSF
+  server.on("/slider8", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String inputMessage;
+    if (request->hasParam(PARAM_INPUT_2)) {
+      inputMessage = request->getParam(PARAM_INPUT_2)->value();
+      Serial.println(inputMessage);
+      sliderValue8 = inputMessage;
+      SSF = sliderValue8.toFloat();  // uS
+      Serial.print("SSF: ");
+      float freqsec = 1000 / SSF;
+      Serial.print(freqsec);
+      Serial.print("ms duty: ");
+      SSFDuty = 100000 / SSF;  //Q 10% dutycycle
+      Serial.print(SSFDuty);
+      Serial.print("us");
+    } else {
+      inputMessage = "No message sent";
+    }
+    //Serial.println(inputMessage);
+    request->send(200, "text/plain", "OK");
+  });
+
+  // SEND a GET request to <ESP_IP>/state
+  server.on("/state", HTTP_GET, [](AsyncWebServerRequest* request) {
+    String stateStr = String(digitalRead(output)).c_str();
+    if (pauseState) stateStr += "1";
+    else stateStr += "0";
+    if (presetMode) stateStr += "0";
+    else stateStr += "1";
+    if (waveFormState) stateStr += "0";
+    else stateStr += "1";
+
+    // Serial.print("stateStr");
+    // Serial.println(stateStr);
+    request->send(200, "text/plain", stateStr);
+  });
+
+
+  // FREQUENCY SELECTION FROM SD CARD
+  server.on("/freqselect", HTTP_GET, [](AsyncWebServerRequest* request) {
+    Serial.println("Read file...");
+    Stop();
+    selectFileFromMem(" Use", "freqselection");  // Build webpage ready for display
+    request->send(200, "text/html", webpage);
+  });
+
+  // FILE UPLOAD PT 1
+  server.on("/upload", HTTP_GET, [](AsyncWebServerRequest* request) {
+    Serial.println("Uploading file...");
+    UploadFileSelect();  // Build webpage ready for display
+    request->send(200, "text/html", webpage);
+  });
+  // FILE UPLOAD PT 2
+  server.on(
+    "/handleupload", HTTP_POST, [](AsyncWebServerRequest* request) {},
+    [](AsyncWebServerRequest* request, const String& filename, size_t index, uint8_t* data,
+       size_t len, bool final) {
+      uploadFileToMem(request, filename, index, data, len, final);
+    });
+  // DELETE FILE
+  server.on("/delete", HTTP_GET, [](AsyncWebServerRequest* request) {
+    Serial.println("Deleting file...");
+    selectFileFromMem(" Delete", "deletehandler");  // Build webpage ready for display
+    request->send(200, "text/html", webpage);
+  });
+  // ##################### NOT FOUND HANDLER #########################
+  server.onNotFound(notFound);
+  // Start server
+  server.begin();
+}
+//#############################################################################################
+//#############################################################################################
+//######################s#######################################################################
+void loop() {
+  if (buttonState) {  // Monitor Start/Stop pyhsical Button Switch
+    delay(250);       //ignore bounces for 100mSe
+    ledState = !ledState;
+    buttonState = LOW;
+    if (ledState && !operationStatus) Start();
+    if (!ledState && operationStatus) Stop();
+    if  (WiFi.status() != WL_CONNECTED ) WiFi.begin(ssid, password);
+  }
+  if (ecoMode && millis() > wifiOffTime ) WiFi.mode(WIFI_OFF);//Shutdown wifi
+
+  if (operationStatus == HIGH && frequencystring == "") {  //Dont run if no freq data
+    Stop();
+    Serial.println("No freq data");
+  }
+
+  if (pulseRate < 100) pulseIntervalRoutine();  //PULSE INTERVAL ROUTINE Run if value is less than 100%
+  if (operationStatus && !pauseState) {
+    if (SSF > 0 && millis() > SSFTime) {  //play background SSF
+      baseTimer();
+      SSFTime = millis() + (1000 / SSF);
+    }
+  }
+
+  if (presetMode == HIGH) {  //Preset chainsets
+
+    if (operationStatus == HIGH && pauseState == LOW) {  //CHAINSET ROUTINE
+      //Serial.println("Playing Presets");
+
+      if (i < 11) {  //Count thro frequency chain
+        if (phasefinishtime > millis()) {
+
+          if (freqencytriggered == LOW) {
+            freqencytriggered = HIGH;
+            phaseFrequency = freq_data[i - 1].freq;
+            Serial.print("Chain set:");
+            Serial.println(i);
+            setFrequency(phaseFrequency, dutyCycle);
+          }
+        } else {  //move to next frequency i
+          freqencytriggered = LOW;
+          phasefinishtime = millis() + treatmentDurationinMins * 6000;
+          Serial.print("phase duration: ");
+          Serial.println(treatmentDurationinMins * 600);
+          i++;
+        }
+      } else {  // END OF FREQ TRAIN STOP i is greater than 9
+                //i = 0;
+        Stop();
+      }
+    }
+  }
+  if (presetMode == LOW) {                                   //Manual Static or Seep frequency routine
+    if (finishTime < millis() && operationStatus == HIGH) {  //Treatment timer for manual mode
+      Stop();
+    }
+    if (operationStatus == HIGH && sweepRange > 0) {  //SWEEP ROUTINE
+
+      if (finishT < millis()) {  //step thro frequencies UP and DOWN
+
+        freqCount = freqCount + sweepFreqInterval;
+        setFrequency(freqCount, dutyCycle);
+        finishT = incrTimeStep + millis();
+        if (freqCount >= maxFreq) sweepFreqInterval = -1 * sweepFreqInterval;
+      }
+    }
+  }
+
+  if (operationStatus == HIGH) {  //DISPLAY STATUS ROUTINE
+    if (publishTime < millis()) {
+      float timeRemaining = 0 + ((phasefinishtime - millis()) / 60000);  // in mimutes
+      phaseTimeRemaining = ((10 - i) * (treatmentDurationinMins / 10)) + timeRemaining;
+      if (sweepRange == 0) freqCount = frequency;
+      if (presetMode) freqCount = phaseFrequency;
+      statusText = "Frequency Playing " + String(freqCount) + " Hz <br>";
+      if (SSF > 0) statusText = "Frequencies Playing " + String(freqCount) + "/" + String(SSF) + " Hz <br>";
+      if (pauseState) statusText += "Paused";
+      else if (presetMode == HIGH) {
+        statusText += "Remaining Time " + remainingMinSec(timeRemaining) + "/" + remainingMinSec(phaseTimeRemaining);
+      }
+
+      else if (presetMode == LOW) {
+        float remainingDuration = (finishTime - millis()) / 60000;
+        statusText += "Time Remaining " + remainingMinSec(remainingDuration);
+      }
+      displayStatusText(statusText);
+      publishTime = millis() + 2000;
+    }
+  }
+}
+//#############################################################################################
+String remainingMinSec(float remDuration) {
+  int remainingMins = remDuration;
+  String remainingsecs = String(int(60 * (remDuration - remainingMins)));
+  if (remainingsecs.length() == 1) remainingsecs = "0" + remainingsecs;
+  String remTimeStr = String(remainingMins) + ":" + remainingsecs;
+  return remTimeStr;
+}
+//#############################################################################################
+void Stop() {
+  timer1_disable();
+  operationStatus = LOW;
+   digitalWrite(output,LOW);
+  finishT = 0;
+  finishTime = 0;
+  phasefinishtime = 0;
+  ledState == LOW;
+  digitalWrite(output, LOW);
+  i = 11;  //above 10 stops cycling thro' preset chain
+  statusText = "STOPPED";
+  //if (WiFi.status() != WL_CONNECTED) ESP.deepSleep(0);
+  displayStatusText(statusText);
+}
+
+void Start() {
+  operationStatus = HIGH;
+  digitalWrite(output,HIGH);
+  finishTime = millis() + treatmentDurationinMins * 60000;  //for playing static / sweep frequency
+  //phasefinishtime = treatmentDurationinMins/10;
+  phasefinishtime = millis() + treatmentDurationinMins * 6000;  //for playin each preset frequency
+  i = 1;
+  interrupt_flag = true;
+  freqencytriggered = LOW;
+  if (sweepRange > 0) sweepParameters();
+  if (presetMode == LOW) {
+    setFrequency(frequency, dutyCycle);  // MANUAL FREQUENCY SET}
+    frequencystring = String(frequency);
+  }
+  freqCount = frequency;
+  statusText = "START";
+  wifiOffTime = millis() + 300000;
+  displayStatusText(statusText);
+
+}
+//#############################################################################################
+void sweepParameters() {
+  //Determine start, stop sweep frequencies and frequency interval
+  Serial.print("Sweep:");
+  Serial.println(sweepRange);
+  minimumfreq = frequency - sweepRange;
+  float displayFreqTime = 0;
+  if (minimumfreq < 1) minimumfreq = 1;
+  maxFreq = frequency + sweepRange;
+
+  //devide sweep range by treatment duration in seconds
+  float stepCounter = (treatmentDurationinMins * 60) + 4;  //seconds
+  sweepFreqInterval = (sweepRange * 4 / stepCounter);      //change every second Up the Down
+  freqCount = minimumfreq;
+}
+//#############################################################################################
+void pulseIntervalRoutine() {
+  if (millis() > pulseEnd) interrupt_flag = false;
+  if (millis() > pulseStart) {
+    interrupt_flag = true;
+    pulseEnd = millis() + pulseRate * 100;
+    pulseStart = millis() + 100 * 100;  //re-start !
+  }
+}
+//#############################################################################################
+void displayStatusText(String statusTxt) {
+  events.send("ping", NULL, millis());
+  events.send(statusTxt.c_str(), "statusText", millis());
+}
+
+//#############################################################################################
+void setFrequency(long timerfreq, int dutycycle) {
+  Serial.print("playing frequency:");
+  Serial.print(timerfreq);
+  Serial.print(" dutycycle:");
+  Serial.println(dutycycle);
+  int ticks;
+  if (timerfreq < 150000) {
+    timer1_enable(TIM_DIV256, TIM_EDGE, TIM_LOOP);
+    ticks = 312500 / timerfreq;
+    duty = ticks * dutycycle * 3.2 / 100;  // Us
+  } else {
+    timer1_enable(TIM_DIV16, TIM_EDGE, TIM_LOOP);
+    ticks = int(5000000 / timerfreq);
+    duty = (ticks * dutycycle / 500);
+  }
+  if (waveFormState) duty += duty;  //For unipolar
+  if (timerfreq > 0 && operationStatus == HIGH) {
+    Serial.print("duty:");
+    Serial.println(duty);
+    timer1_write(ticks);
+    Serial.println("Frequency set");
+  }
+}
+
+
+//#############################################################################################
+void Dirr(AsyncWebServerRequest* request) {
+  String Fname1, Fname2;
+  Serial.println("void Dirr openned..");
+  int index = 0;
+  Directory();  // Get a list of the current files in mem
+
+  webpage = "<!DOCTYPE HTML><html><head>";
+  webpage += "<title>PEMF Device Controller</title>";
+  webpage += "<h3>Contenu systÃ¨me classement</h3><br>";
+  if (numfiles > 0) {
+    webpage += "<table class='center'>";
+    webpage += "<tr><th>Type</th><th>File Name</th><th>File Size</th><th class='sp'></th><th>Type</th><th>File Name</th><th>File Size</th></tr>";
+    while (index < numfiles) {
+      Fname1 = Filenames[index].filename;
+      Fname2 = Filenames[index + 1].filename;
+      webpage += "<tr>";
+      webpage += "<td style = 'width:5%'>" + Filenames[index].ftype + "</td><td style = 'width:25%'>" + Fname1 + "</td><td style = 'width:10%'>" + Filenames[index].LittleFSize + "</td>";
+      webpage += "<td class='sp'></td>";
+      if (index < numfiles - 1) {
+        webpage += "<td style = 'width:5%'>" + Filenames[index + 1].ftype + "</td><td style = 'width:25%'>" + Fname2 + "</td><td style = 'width:10%'>" + Filenames[index + 1].LittleFSize + "</td>";
+      }
+      webpage += "</tr>";
+      index = index + 2;
+    }
+    webpage += "</table>";
+    webpage += "<p style='background-color:yellow;'><b>" + MessageLine + "</b></p>";
+    MessageLine = "";
+  } else {
+    webpage += "<h2>Aucun fichier trouvÃ©</h2>";
+  }
+  webpage += "</body></html>";
+  request->send(200, "text/html", webpage);
+  Serial.println("webpage prepared...");
+}
+//#############################################################################################
+void Directory() {
+  numfiles = 0;  // Reset number of  files counter
+
+  Dir dir = LittleFS.openDir("");
+  while (dir.next()) {
+    if (dir.isFile()) {
+      Filenames[numfiles].filename = dir.fileName();
+      Serial.println(Filenames[numfiles].filename);
+      if (Filenames[numfiles].filename == "ini.cfg") numfiles--;
+      numfiles++;
+    }
+  }
+}
+
+
+//#############################################################################################
+void UploadFileSelect() {
+
+  webpage = "";
+  webpage = AppendHeader();
+
+  webpage += "<h3>Select a Frequency Set to Upload</h3>";
+  webpage += "<form method = 'POST' action = '/handleupload' enctype='multipart/form-data'>";
+  webpage += "<input type='file' name='filename'><br><br>";
+  webpage += "<input type='submit' value='Upload'>";
+  webpage += "<br><h1></h1><button type='button\' onclick=location.href='/'>Annuler</a></button>";
+  webpage += "</form>";
+}
+
+//#############################################################################################
+void selectFileFromMem(String title, String function) {
+  String Fname1, Fname2;
+  int index = 0;
+  Directory();  // Get a list of files in memory
+  webpage = AppendHeader();
+  webpage += "<h3>SÃ©lectionner un Programme sur " + title + "</h3>";
+  webpage += "<table class='center'>";
+  //webpage += "<tr><th>File Name</th><th>File Size</th><th class='sp'></th><th>File Name</th><th>File Size</th></tr>";
+  webpage += "<tr><th>Frequency Set</th></th><th>Frequency Set</th></tr>";
+  while (index < numfiles) {
+    Fname1 = Filenames[index].filename;
+    Fname2 = Filenames[index + 1].filename;
+    if (Fname1.startsWith("/")) Fname1 = Fname1.substring(1);
+    if (Fname2.startsWith("/")) Fname1 = Fname2.substring(1);
+    webpage += "<tr>";
+    //webpage += "<td style='width:25%'><button><a href='" + function + "~/" + Fname1 + "'>" + Fname1 + "</a></button></td><td style = 'width:10%'>" + "file size" + "</td>";
+    //webpage += "<td style='width:45%'><button><a href='" + function + "~/" + Fname1 + "'>" + Fname1 + "</a></button></td>";
+    webpage += "<td style='width:50%'><a href='" + function + "~/" + Fname1 + "'>" + Fname1 + "</a></td>";
+    //webpage += "<td class='sp'></td>";
+    if (index < numfiles - 1) {
+      // webpage += "<td style='width:25%'><button><a href='" + function + "~/" + Fname2 + "'>" + Fname2 + "</a></button></td><td style = 'width:10%'>" + "file size" + "</td>";
+      //webpage += "<td style='width:45%'><button><a href='" + function + "~/" + Fname2 + "'>" + Fname2 + "</a></button></td>";
+      webpage += "<td style='width:50%'><a href='" + function + "~/" + Fname2 + "'>" + Fname2 + "</a></td>";
+    } else {
+      webpage += "<td style='width:50%'><a href=''></a></td>";
+    }  //if odd number of columns
+    webpage += "</tr>";
+    index = index + 2;
+  }
+  webpage += "</table>";
+  Serial.print(function);
+  if (function != "deletehandler") webpage += "<br><h1></h1><button type='button\' onclick=location.href='/upload'>TÃ©lÃ©chargement nouveau Programme</a></button>";
+  webpage += "<br><h1></h1><button type='button\' onclick=location.href='/delete'>Supprimer Programme</a></button>";
+  webpage += "<br><h1></h1><button type='button\' onclick=location.href='/'>Annuler</a></button>";
+}
+
+
+
+
+//#############################################################################################
+String AppendHeader() {
+  String page;
+  page = "<!DOCTYPE HTML><html>";
+  page += "<head> <title>PEMF Device Controller</title> <meta name='viewport' content='width=device-width, initial-scale=1'>";
+  page += "<style>     html {font-family: Arial; display: inline-block; text-align: center;} h2 {font-size: 1.5rem;} p {font-size: 1.5rem;} body {max-width: 600px; margin:0px auto; padding-bottom: 25px;}";
+  //page += "table, th, td {  border: 1px solid white;  border-collapse: collapse;}";
+  //page += "table.center {  margin-left: auto;  margin-right: auto;}";
+  //page += ".button {style='background-color:#2196F3; font-size:1.25em; border-radius: 6px; color:white; border: none; cursor: pointer;'} ";
+  page += "table {  font-family: arial, sans-serif;  border-collapse: collapse;  width: 100%;}td, th {  border: 1px solid #dddddd;  text-align: left;  padding: 8px;}tr:nth-child(even) {  background-color: #dddddd;}";
+  page += " a:link { text-decoration: none;} a:visited {  text-decoration: none;} a:hover { text-decoration: none;} a:active {text-decoration: none;}";
+  page += " a { text-decoration: none;}";
+  page += "</style></head>";
+  return page;
+}
+
+
+
+//#############################################################################################
+void uploadFileToMem(AsyncWebServerRequest* request, const String& filename, size_t index, uint8_t* data, size_t len, bool final) {
+  if (!index) {
+    String file = filename;
+    Serial.print("file to upload:");
+    Serial.println(filename);
+    if (!filename.startsWith("/")) file = "/" + filename;
+    request->_tempFile = LittleFS.open(file, "w");
+    if (!request->_tempFile) Serial.println("Error creating file for upload...");
+  }
+  if (request->_tempFile) {
+    if (len) {
+      request->_tempFile.write(data, len);  // Chunked data
+      Serial.println("Transferred : " + String(len) + " Bytes");
+    }
+    if (final) {
+      uploadsize = request->_tempFile.size();
+      request->_tempFile.close();
+      request->redirect("/freqselect");
+    }
+  }
+  request->redirect("/freqselect");
+}
+
+//#############################################################################################
+void deleteFileFromMem(String filename) {  // Delete the file
+  webpage = "";
+  webpage = AppendHeader();
+  Serial.print("delete file: ");
+  Serial.println(filename);
+  if (!filename.startsWith("/")) filename = "/" + filename;
+  File dataFile = LittleFS.open(filename, "r");  // Now read FS to see if file exists
+  if (dataFile) {                                // It does so delete it
+    LittleFS.remove(filename);
+    webpage += "<h3>Programme  '" + filename.substring(1) + "' a ete supprime</h3>";
+    webpage += "<a href='/freqselect'>[Enter]</a><br><br>";
+  } else {
+    webpage += "<h3>File [ " + filename + " ] n'existe pas</h3>";
+    webpage += "<a href='/freqselect'>[Enter]</a><br><br>";
+  }
+}
+//#############################################################################################
+void notFound(AsyncWebServerRequest* request) {  // Process selected file types
+  String filename;
+
+  filename = request->url().substring(request->url().indexOf("~/") + 1);
+  if (request->url().startsWith("/deletehandler")) {
+    Serial.println("Delete handler started...");
+    deleteFileFromMem(filename);  // Build webpage ready for display
+    request->send(200, "text/html", webpage);
+  }
+  if (request->url().startsWith("/freqselection")) {
+    Serial.println("freqselection handler started...");
+    freqset = filename;
+    readFrequencyFile();
+    Serial.println(" freq read routine >>> notFound");
+    //request->send_P(200, "text/html", index_html, processor);
+    //request->send(200, "text/html", webpage);
+    request->redirect("/");
+  }
+
+  else {
+    Page_Not_Found();
+    request->send(200, "text/html", webpage);
+  }
+}
+//#############################################################################################
+void readFrequencyFile() {
+  Serial.print("readFrequencyFile routine started ... filenemae: ");
+  Serial.println(freqset);
+  
+  //Open the file
+  File file = LittleFS.open(freqset, "r");
+  //int count = 0;
+  //Check if the file exists
+  if (!file) {
+    Serial.println("File not found");
+    return;
+  }
+  //while(file.available()){
+  for (int j = 0; j <= 9; j++) {
+    freq_data[j].freq = file.parseFloat();
+    //count++;
+  }
+
+  file.close();
+
+  frequencystring = "(" + freqset.substring(1, 9) + ") ";
+  for (int j = 0; j <= 9; j++) {
+    frequencystring += ((String(freq_data[j].freq)) + ", ");
+  }
+  Serial.println(frequencystring);
+}
+//#############################################################################################
+void readIniFile() {  //Open the file
+  File file = LittleFS.open("/ini.cfg", "r");
+  if (!file) {
+    Serial.println("File not found");
+    return;
+  }
+
+  waveFormState = file.parseInt();
+  Serial.println(waveFormState);
+  presetMode = file.parseInt();
+  Serial.println(presetMode);
+  sliderValue = file.parseFloat();
+  Serial.println(sliderValue);
+  sliderValue2 = file.parseFloat();
+  Serial.println(sliderValue2);
+  sliderValue3 = file.parseFloat();
+  Serial.println(sliderValue3);
+  sliderValue4 = file.parseFloat();
+  Serial.println(sliderValue4);
+  sliderValue7 = file.parseFloat();
+  Serial.println(sliderValue7);
+  sliderValue8 = file.parseFloat();
+  Serial.println(sliderValue8);
+  freqset = file.readString();
+  //freqset = file.read();
+  Serial.println(freqset);
+
+  file.close();
+  Serial.println("read ini");
+  frequency = sliderValue.toFloat();
+  dutyCycle = sliderValue2.toFloat();
+  pulseRate = sliderValue3.toFloat();
+  treatmentDurationinMins = sliderValue4.toFloat();
+  sweepRange = sliderValue7.toFloat();
+  SSF = sliderValue8.toFloat();
+}
+//#############################################################################################
+void saveIniFile() {
+  //Open the file
+  LittleFS.remove("/ini.cfg");
+  File file = LittleFS.open("/ini.cfg", "w");
+
+  file.print(waveFormState);
+  file.print(",");
+  file.print(presetMode);
+  file.print(",");
+  file.print(frequency);
+  file.print(",");
+  file.print(dutyCycle);
+  file.print(",");
+  file.print(pulseRate);
+  file.print(",");
+  file.print(treatmentDurationinMins);
+  file.print(",");
+  file.print(sweepRange);
+  file.print(",");
+  file.print(SSF);
+  //file.print(",");
+  file.print(freqset);
+  //file.print(",");
+
+  file.close();
+  Serial.println("save ini");
+}
+
+//#############################################################################################
+void Page_Not_Found() {
+  webpage = AppendHeader();
+  webpage += "<div class='notfound'>";
+  webpage += "<h1>Desole</h1>";
+  webpage += "<p>Erreur 404 - Page introuvable</p>";
+  webpage += "</div><div class='left'>";
+  webpage += "<p>La page que vous recherchez n'a pas Ã©tÃ© trouvÃ©e, elle a peut-Ãªtre Ã©tÃ© dÃ©placÃ©e ou est actuellement indisponible..</p>";
+  webpage += "<p>Veuillez vÃ©rifier que l'adresse est correctement orthographiÃ©e et rÃ©essayer..</p>";
+  webpage += "<p>Ou cliquez sur <b><a href='/'>[Here]</a></b> pour la page d'accueil.</p></div>";
+}
